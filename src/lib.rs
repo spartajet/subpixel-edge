@@ -34,6 +34,7 @@ fn bilinear_interpolation(data: &[f32], width: u32, height: u32, x: f32, y: f32)
 }
 
 /// 在3x3区域内进行亚像素边缘定位
+#[allow(clippy::too_many_arguments)]
 fn subpixel_in_3x3(
     x: u32,
     y: u32,
@@ -113,8 +114,8 @@ pub fn canny_based_subpixel_edges(
 
     // 步骤2：计算梯度信息
     // let (gx_image, gy_image) = sobel_gradients(image);
-    let gx_image = horizontal_sobel(&image);
-    let gy_image = vertical_sobel(&image);
+    let gx_image = horizontal_sobel(image);
+    let gy_image = vertical_sobel(image);
 
     let gx_data: Vec<f32> = gx_image.pixels().map(|p| p[0] as f32).collect();
     let gy_data: Vec<f32> = gy_image.pixels().map(|p| p[0] as f32).collect();
@@ -165,8 +166,8 @@ pub fn canny_based_subpixel_edges_parallel(
     let canny_edges = canny(image, low_threshold, high_threshold);
 
     // 步骤2：计算梯度信息
-    let gx_image = horizontal_sobel(&image);
-    let gy_image = vertical_sobel(&image);
+    let gx_image = horizontal_sobel(image);
+    let gy_image = vertical_sobel(image);
     let gx_data: Vec<f32> = gx_image.pixels().map(|p| p[0] as f32).collect();
     let gy_data: Vec<f32> = gy_image.pixels().map(|p| p[0] as f32).collect();
 
