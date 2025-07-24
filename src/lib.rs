@@ -276,6 +276,9 @@ pub fn canny_based_subpixel_edges_optimized(
     // let gy_image = vertical_sobel(image);
 
     let (gx_data, gy_data) = parallel_sobel_gradients(image);
+
+    debug!("gx_data and gy_data ok");
+
     let gx_image_data: Vec<i16> = gx_data.par_iter().map(|p| *p as i16).collect();
     let gy_image_data: Vec<i16> = gy_data.par_iter().map(|p| *p as i16).collect();
 
