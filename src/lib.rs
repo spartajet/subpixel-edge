@@ -1,5 +1,8 @@
-use image::{GrayImage, Rgb, RgbImage, buffer::ConvertBuffer};
+use std::f32::consts::PI;
+
+use image::{GenericImageView, GrayImage, ImageBuffer, Luma, Rgb, RgbImage, buffer::ConvertBuffer};
 use imageproc::{
+    definitions::{HasBlack, HasWhite},
     edges::canny,
     gradients::{horizontal_sobel, vertical_sobel},
 };
@@ -265,54 +268,38 @@ pub fn canny_based_subpixel_edges_optimized(
     let (width, height) = image.dimensions();
 
     // 步骤1：使用Canny检测像素级边缘
-    let canny_edges = canny(image, low_threshold, high_threshold);
+    // let canny_edges = canny(image, low_threshold, high_threshold);
 
     // 步骤2：并行计算梯度信息
     let gx_image = horizontal_sobel(image);
     let gy_image = vertical_sobel(image);
 
     // 并行化所有数据转换和计算
-    let gx_pixels: Vec<_> = gx_image.pixels().collect();
-    let gy_pixels: Vec<_> = gy_image.pixels().collect();
+    let gx_data: Vec<f32> = gx_image.pixels().map(|p| p[0] as f32).collect();
+    let gy_data: Vec<f32> = gy_image.pixels().map(|p| p[0] as f32).collect();
 
-    let tuples: Vec<(f32, f32, f32)> = gx_pixels
-        .into_par_iter()
-        .zip(gy_pixels.into_par_iter())
-        .map(|(gx_pixel, gy_pixel)| {
-            let gx = gx_pixel[0] as f32;
-            let gy = gy_pixel[0] as f32;
-            let mag = (gx.powi(2) + gy.powi(2)).sqrt();
-            (gx, gy, mag)
-        })
+    let mag_data: Vec<f32> = gx_data
+        .par_iter()
+        .zip(gy_data.par_iter())
+        .map(|(gx, gy)| (gx.powi(2) + gy.powi(2)).sqrt())
         .collect();
 
-    let mut gx_data = Vec::with_capacity(tuples.len());
-    let mut gy_data = Vec::with_capacity(tuples.len());
-    let mut mag_data = Vec::with_capacity(tuples.len());
+    let g: Vec<f32> = gx_image
+        .iter()
+        .zip(gy_image.iter())
+        .map(|(h, v)| (*h as f32).hypot(*v as f32))
+        .collect::<Vec<f32>>();
 
-    for (gx, gy, mag) in tuples {
-        gx_data.push(gx);
-        gy_data.push(gy);
-        mag_data.push(mag);
-    }
+    let g = ImageBuffer::from_raw(image.width(), image.height(), g).unwrap();
 
-    // 步骤3：并行收集和处理边缘点
-    let canny_points: Vec<(u32, u32)> = (1..(height - 1))
-        .into_par_iter()
-        .flat_map(|y| {
-            let canny_edges = &canny_edges;
-            (1..(width - 1)).into_par_iter().filter_map(move |x| {
-                if canny_edges.get_pixel(x, y)[0] > 0 {
-                    Some((x, y))
-                } else {
-                    None
-                }
-            })
-        })
-        .collect();
+    // 3. Non-maximum-suppression (Make edges thinner)
+    let thinned = non_maximum_suppression(&g, &gx_image, &gy_image);
+
+    // 4. Hysteresis to filter out edges based on thresholds.
+    let canny_edge_points = hysteresis(&thinned, low_threshold, high_threshold);
 
     // 并行处理每个边缘点
-    canny_points
+    canny_edge_points
         .into_par_iter()
         .filter_map(|(x, y)| {
             subpixel_in_3x3(
@@ -327,4 +314,114 @@ pub fn canny_based_subpixel_edges_optimized(
             )
         })
         .collect()
+}
+
+/// Finds local maxima to make the edges thinner.
+/// Finds local maxima to make the edges thinner.
+fn non_maximum_suppression(
+    g: &ImageBuffer<Luma<f32>, Vec<f32>>,
+    gx: &ImageBuffer<Luma<i16>, Vec<i16>>,
+    gy: &ImageBuffer<Luma<i16>, Vec<i16>>,
+) -> ImageBuffer<Luma<f32>, Vec<f32>> {
+    const RADIANS_TO_DEGREES: f32 = 180f32 / PI;
+    let mut out = ImageBuffer::from_pixel(g.width(), g.height(), Luma([0.0]));
+    let mut points = Vec::new();
+    for y in 1..g.height() - 1 {
+        for x in 1..g.width() - 1 {
+            let x_gradient = gx[(x, y)][0] as f32;
+            let y_gradient = gy[(x, y)][0] as f32;
+            let mut angle = (y_gradient).atan2(x_gradient) * RADIANS_TO_DEGREES;
+            if angle < 0.0 {
+                angle += 180.0
+            }
+            // Clamp angle.
+            let clamped_angle = if !(22.5..157.5).contains(&angle) {
+                0
+            } else if (22.5..67.5).contains(&angle) {
+                45
+            } else if (67.5..112.5).contains(&angle) {
+                90
+            } else if (112.5..157.5).contains(&angle) {
+                135
+            } else {
+                unreachable!()
+            };
+
+            // Get the two perpendicular neighbors.
+            let (cmp1, cmp2) = unsafe {
+                match clamped_angle {
+                    0 => (g.unsafe_get_pixel(x - 1, y), g.unsafe_get_pixel(x + 1, y)),
+                    45 => (
+                        g.unsafe_get_pixel(x + 1, y + 1),
+                        g.unsafe_get_pixel(x - 1, y - 1),
+                    ),
+                    90 => (g.unsafe_get_pixel(x, y - 1), g.unsafe_get_pixel(x, y + 1)),
+                    135 => (
+                        g.unsafe_get_pixel(x - 1, y + 1),
+                        g.unsafe_get_pixel(x + 1, y - 1),
+                    ),
+                    _ => unreachable!(),
+                }
+            };
+            let pixel = *g.get_pixel(x, y);
+            // If the pixel is not a local maximum, suppress it.
+            if pixel[0] < cmp1[0] || pixel[0] < cmp2[0] {
+                out.put_pixel(x, y, Luma([0.0]));
+            } else {
+                out.put_pixel(x, y, pixel);
+                points.push((x, y));
+            }
+        }
+    }
+    println!("points len:{}", points.len());
+    out
+}
+
+/// Filter out edges with the thresholds.
+/// Non-recursive breadth-first search.
+fn hysteresis(
+    input: &ImageBuffer<Luma<f32>, Vec<f32>>,
+    low_thresh: f32,
+    high_thresh: f32,
+) -> Vec<(u32, u32)> {
+    let max_brightness = Luma::<u8>::white();
+    let min_brightness = Luma::<u8>::black();
+    // Init output image as all black.
+    let mut out = ImageBuffer::from_pixel(input.width(), input.height(), min_brightness);
+    // Stack. Possible optimization: Use previously allocated memory, i.e. gx.
+    let mut edges = Vec::with_capacity(((input.width() * input.height()) / 2) as usize);
+    let mut result_edge_points = Vec::new();
+    for y in 1..input.height() - 1 {
+        for x in 1..input.width() - 1 {
+            let inp_pix = *input.get_pixel(x, y);
+            let out_pix = *out.get_pixel(x, y);
+            // If the edge strength is higher than high_thresh, mark it as an edge.
+            if inp_pix[0] >= high_thresh && out_pix[0] == 0 {
+                out.put_pixel(x, y, max_brightness);
+                edges.push((x, y));
+                // Track neighbors until no neighbor is >= low_thresh.
+                while let Some((nx, ny)) = edges.pop() {
+                    let neighbor_indices = [
+                        (nx + 1, ny),
+                        (nx + 1, ny + 1),
+                        (nx, ny + 1),
+                        (nx - 1, ny - 1),
+                        (nx - 1, ny),
+                        (nx - 1, ny + 1),
+                    ];
+
+                    for neighbor_idx in &neighbor_indices {
+                        let in_neighbor = *input.get_pixel(neighbor_idx.0, neighbor_idx.1);
+                        let out_neighbor = *out.get_pixel(neighbor_idx.0, neighbor_idx.1);
+                        if in_neighbor[0] >= low_thresh && out_neighbor[0] == 0 {
+                            out.put_pixel(neighbor_idx.0, neighbor_idx.1, max_brightness);
+                            edges.push((neighbor_idx.0, neighbor_idx.1));
+                            result_edge_points.push((neighbor_idx.0, neighbor_idx.1));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result_edge_points
 }

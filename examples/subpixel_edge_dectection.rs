@@ -1,9 +1,7 @@
 use std::time::Instant;
 
 use image::{imageops::blur, open};
-use subpixel_edge::{
-    canny_based_subpixel_edges, canny_based_subpixel_edges_optimized, visualize_edges,
-};
+use subpixel_edge::{canny_based_subpixel_edges_optimized, visualize_edges};
 
 fn main() {
     // 加载图像
@@ -14,7 +12,7 @@ fn main() {
     let instance = Instant::now();
 
     // 亚像素边缘检测
-    let edges = canny_based_subpixel_edges_optimized(&blur, 20.0, 80.0, 0.7);
+    let edges = canny_based_subpixel_edges_optimized(&blur, 20.0, 80.0, 0.6);
 
     let elapsed = instance.elapsed();
     println!("检测耗时: {elapsed:?}");
