@@ -1,7 +1,7 @@
-use image::{GrayImage, Luma, Pixel};
+use image::{GrayImage, Luma, Pixel, Rgba, RgbaImage, buffer::ConvertBuffer};
 use imageproc::{
     definitions::Image,
-    gradients::{sobel_gradient_map, sobel_gradients},
+    gradients::{horizontal_sobel, sobel_gradient_map, sobel_gradients, vertical_sobel},
 };
 
 /// 双线性插值函数
@@ -51,13 +51,19 @@ pub fn subpixel_edge_detection(
     // let gx_data = gx.as_raw();
     // let gy_data = gy.as_raw();
     //
-    let mag_data = sobel_gradients(image);
+    let gx = horizontal_sobel(image);
+    let gy = vertical_sobel(image);
+
+    // 将梯度转换为f32并存储为Vec
+    let gx_data: Vec<f32> = gx.iter().map(|&p| p as f32).collect();
+    let gy_data: Vec<f32> = gy.iter().map(|&p| p as f32).collect();
 
     // 计算梯度幅值
-    let mut mag_data = vec![0.0f32; (width * height) as usize];
-    for i in 0..(width * height) as usize {
-        mag_data[i] = (gx_data[i].powi(2) + gy_data[i].powi(2)).sqrt();
-    }
+    let mag_data: Vec<f32> = gx_data
+        .iter()
+        .zip(gy_data.iter())
+        .map(|(gx, gy)| (gx.powi(2) + gy.powi(2)).sqrt())
+        .collect();
 
     let mut edge_points = Vec::new();
 
@@ -129,16 +135,16 @@ pub fn subpixel_edge_detection(
 }
 
 /// 可视化亚像素边缘（调试用）
-pub fn visualize_edges(image: &GrayImage, edge_points: &[(f32, f32)], scale: u32) -> GrayImage {
-    let mut canvas = image.clone();
-    let white = Luma([255u8]);
+pub fn visualize_edges(image: &GrayImage, edge_points: &[(f32, f32)]) -> RgbaImage {
+    let mut canvas: RgbaImage = image.convert();
+    let red = Rgba([255, 0, 0, 100]);
 
     for &(x, y) in edge_points {
-        let sx = (x * scale as f32) as i32;
-        let sy = (y * scale as f32) as i32;
+        let sx = x as i32;
+        let sy = y as i32;
 
         if sx >= 0 && sy >= 0 && sx < canvas.width() as i32 && sy < canvas.height() as i32 {
-            canvas.put_pixel(sx as u32, sy as u32, white);
+            canvas.put_pixel(sx as u32, sy as u32, red);
         }
     }
 
