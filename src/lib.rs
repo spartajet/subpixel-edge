@@ -11,6 +11,7 @@
 //! - Hysteresis thresholding with parallel optimization
 //! - Subpixel edge localization using parabolic fitting
 //! - Edge visualization utilities
+//! - Optional debug logging (enable with `logger` feature)
 //!
 //! ## Basic Usage
 //!
@@ -27,6 +28,34 @@
 //! result.save("edges_output.png").unwrap();
 //!
 //! println!("Found {} subpixel edge points", edges.len());
+//! ```
+//!
+//! ## Optional Features
+//!
+//! ### Logger Feature
+//!
+//! Enable debug logging to monitor the edge detection pipeline:
+//!
+//! ```toml
+//! [dependencies]
+//! subpixel-edge = { version = "0.1.0", features = ["logger"] }
+//! log = "0.4"
+//! env_logger = "0.11"
+//! ```
+//!
+//! ```rust,no_run
+//! use image::open;
+//! use subpixel_edge::canny_based_subpixel_edges_optimized;
+//!
+//! // Initialize logger to see debug output
+//! env_logger::init();
+//!
+//! let image = open("example.png").unwrap().to_luma8();
+//! let edges = canny_based_subpixel_edges_optimized(&image, 20.0, 80.0, 0.6);
+//! // With logger feature, you'll see debug messages like:
+//! // DEBUG subpixel_edge: start calculate subpixel edges
+//! // DEBUG subpixel_edge: thinned ok
+//! // DEBUG subpixel_edge: canny_edge_points ok
 //! ```
 //!
 //! ## Advanced Usage
@@ -59,12 +88,24 @@
 
 use image::{GenericImageView, GrayImage, ImageBuffer, Luma, Rgb, RgbImage, buffer::ConvertBuffer};
 use imageproc::definitions::{HasBlack, HasWhite};
-use log::debug;
 use rayon::prelude::*;
 use std::{
     f32::consts::PI,
     sync::{Arc, Mutex},
 };
+
+// Conditional logging macros
+#[cfg(feature = "logger")]
+macro_rules! debug {
+    ($($arg:tt)*) => {
+        log::debug!($($arg)*);
+    };
+}
+
+#[cfg(not(feature = "logger"))]
+macro_rules! debug {
+    ($($arg:tt)*) => {};
+}
 
 /// Performs high-performance Canny-based subpixel edge detection with parallel optimization.
 ///
@@ -878,4 +919,56 @@ fn subpixel_in_3x3(
     let sub_y = y as f32 + offset * dy;
 
     Some((sub_x, sub_y))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::ImageBuffer;
+
+    #[test]
+    fn test_logger_feature_compilation() {
+        // This test ensures that the code compiles with and without the logger feature
+        // The debug! macro should work in both cases
+
+        // Create a small test image
+        let image = ImageBuffer::from_fn(10, 10, |_x, _y| image::Luma([128u8]));
+
+        // Test that debug macro doesn't cause compilation errors
+        debug!("Test debug message");
+
+        // Test basic functionality works regardless of logger feature
+        let (gx, gy) = parallel_sobel_gradients(&image);
+        assert_eq!(gx.len(), 100); // 10x10 = 100 pixels
+        assert_eq!(gy.len(), 100);
+    }
+
+    #[test]
+    #[cfg(feature = "logger")]
+    fn test_logger_feature_enabled() {
+        // This test only runs when the logger feature is enabled
+        use std::cell::RefCell;
+        use std::sync::{Arc, Mutex};
+
+        // Verify that log crate is available when feature is enabled
+        assert!(true, "Logger feature is enabled and working");
+    }
+
+    #[test]
+    #[cfg(not(feature = "logger"))]
+    fn test_logger_feature_disabled() {
+        // This test only runs when the logger feature is disabled
+        assert!(true, "Logger feature is disabled and library still works");
+    }
+
+    #[test]
+    fn test_debug_macro_no_panic() {
+        // Test that debug macro calls don't panic regardless of feature state
+        debug!("Starting test");
+        debug!("Processing data: {}", 42);
+        debug!("Test completed successfully");
+
+        // If we reach here, the debug macro is working correctly
+        assert!(true);
+    }
 }

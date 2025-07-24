@@ -1,21 +1,44 @@
 [package]
 name = "subpixel-edge"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+authors = ["Dr.Guo <guoxiaozhong1990@outlook.com>"]
+description = "High-performance subpixel edge detection library with parallel processing using Canny algorithm"
+homepage = "https://github.com/spartajet/subpixel-edge"
+repository = "https://github.com/spartajet/subpixel-edge"
+documentation = "https://docs.rs/subpixel-edge"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = [
+    "computer-vision",
+    "edge-detection",
+    "image-processing",
+    "subpixel",
+    "canny",
+]
+categories = ["computer-vision", "algorithms", "multimedia::images", "science"]
+exclude = ["test_image/*", ".git*", "target/*", "*.png", "*.jpg", "*.jpeg"]
+rust-version = "1.70"
+
+[features]
+default = []
+logger = ["log"]
 
 [dependencies]
 image = "0.25.*"
 imageproc = { version = "0.25.*", features = ["rayon"] }
-log = "0.4.27"
+log = { version = "0.4.27", optional = true }
 rayon = "1.10.0"
 
 [dev-dependencies]
 env_logger = "0.11.8"
+log = "0.4.27"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [[example]]
-name = "subpixel_edge_dectection"
-path = "examples/subpixel_edge_dectection.rs"
-
-[[example]]
-name = "hysteresis_performance"
-path = "examples/hysteresis_performance.rs"
+name = "subpixel_edge_detection"
+path = "examples/subpixel_edge_detection.rs"
+required-features = ["logger"]

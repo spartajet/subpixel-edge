@@ -25,7 +25,30 @@ subpixel-edge = "0.1.0"
 image = "0.25"
 ```
 
+Or install from crates.io:
+
+```bash
+cargo add subpixel-edge
+```
+
+### Optional Features
+
+The crate supports the following optional features:
+
+- `logger`: Enables debug logging output for performance monitoring and troubleshooting
+
+To enable logging:
+
+```toml
+[dependencies]
+subpixel-edge = { version = "0.1.0", features = ["logger"] }
+log = "0.4"
+env_logger = "0.11" # or your preferred logger implementation
+```
+
 ## Quick Start
+
+### Basic Usage (without logging)
 
 ```rust
 use image::open;
@@ -34,7 +57,7 @@ use subpixel_edge::{canny_based_subpixel_edges_optimized, visualize_edges};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load image
     let image = open("input.png")?.to_luma8();
-    
+
     // Detect subpixel edges
     let edges = canny_based_subpixel_edges_optimized(
         &image,
@@ -42,14 +65,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         80.0,  // high_threshold
         0.6    // edge_point_threshold
     );
-    
+
     // Visualize results
     let visualization = visualize_edges(&image, &edges);
     visualization.save("edges_output.png")?;
-    
+
     println!("Detected {} subpixel edge points", edges.len());
     Ok(())
 }
+```
+
+### With Logging Enabled
+
+```rust
+use image::open;
+use subpixel_edge::{canny_based_subpixel_edges_optimized, visualize_edges};
+use env_logger;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logger to see debug output from the library
+    env_logger::init();
+
+    let image = open("input.png")?.to_luma8();
+    let edges = canny_based_subpixel_edges_optimized(&image, 20.0, 80.0, 0.6);
+
+    // With logger feature enabled, you'll see debug output like:
+    // DEBUG subpixel_edge: start calculate subpixel edges
+    // DEBUG subpixel_edge: gx_data and gy_data ok
+    // DEBUG subpixel_edge: mag_data ok
+    // DEBUG subpixel_edge: thinned ok
+    // DEBUG subpixel_edge: canny_edge_points ok
+
+    let visualization = visualize_edges(&image, &edges);
+    visualization.save("edges_output.png")?;
+
+    println!("Detected {} subpixel edge points", edges.len());
+    Ok(())
+}
+```
+
+Run with logging:
+```bash
+cargo run --features logger
+# or set log level
+RUST_LOG=debug cargo run --features logger
 ```
 
 ## Algorithm Pipeline
@@ -229,11 +288,11 @@ use image::{Rgb, RgbImage};
 use subpixel_edge::{canny_based_subpixel_edges_optimized, visualize_edges};
 
 fn custom_edge_overlay(
-    image: &image::GrayImage, 
+    image: &image::GrayImage,
     edges: &[(f32, f32)]
 ) -> RgbImage {
     let mut canvas = visualize_edges(image, edges);
-    
+
     // Add additional markers for strong edges
     for &(x, y) in edges.iter() {
         let ix = x as u32;
@@ -246,9 +305,43 @@ fn custom_edge_overlay(
             canvas.put_pixel(ix, iy+1, Rgb([255, 255, 0]));
         }
     }
-    
+
     canvas
 }
+```
+
+## Features
+
+### Default Features
+- Core edge detection functionality
+- Parallel processing with rayon
+- Image I/O and processing utilities
+
+### Optional Features
+
+#### `logger`
+Enables debug logging throughout the edge detection pipeline. When enabled, the library will output detailed debug information including:
+
+- Processing stage completions
+- Performance timing markers
+- Data structure initialization status
+- Algorithm progress indicators
+
+**Usage:**
+```toml
+[dependencies]
+subpixel-edge = { version = "0.1.0", features = ["logger"] }
+```
+
+**Example output with logging enabled:**
+```
+DEBUG subpixel_edge: start calculate subpixel edges
+DEBUG subpixel_edge: gx_data and gy_data ok
+DEBUG subpixel_edge: gx_image and gy_image ok
+DEBUG subpixel_edge: mag_data ok
+DEBUG subpixel_edge: points len:571704
+DEBUG subpixel_edge: thinned ok
+DEBUG subpixel_edge: canny_edge_points ok
 ```
 
 ## Dependencies
@@ -256,15 +349,27 @@ fn custom_edge_overlay(
 - **image** (0.25): Image processing and I/O
 - **imageproc** (0.25): Additional image processing utilities
 - **rayon** (1.10): Data parallelism library
-- **log** (0.4): Logging framework
+- **log** (0.4): Logging framework (optional, only with `logger` feature)
 
 ## Development Dependencies
 
 - **env_logger** (0.11): Environment-based logger for examples
+- **log** (0.4): Required for examples that use logging
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is dual-licensed under either:
+
+* MIT License ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
 
 ## Contributing
 
@@ -273,11 +378,21 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
 ### Development Setup
 
 ```bash
-git clone https://github.com/your-username/subpixel-edge.git
+git clone https://github.com/spartajet/subpixel-edge
 cd subpixel-edge
 cargo build
 cargo test
-cargo run --example subpixel_edge_detection
+cargo run --features logger --example subpixel_edge_detection
+```
+
+### Publishing
+
+This crate is published on [crates.io](https://crates.io/crates/subpixel-edge).
+
+To publish a new version:
+```bash
+cargo publish --dry-run
+cargo publish
 ```
 
 ## Acknowledgments
