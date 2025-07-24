@@ -1,5 +1,5 @@
 use image::{imageops::blur, open};
-use subpixel_edge::{subpixel_edge_detection, visualize_edges};
+use subpixel_edge::{canny_based_subpixel_edges, visualize_edges};
 
 fn main() {
     // 加载图像
@@ -8,9 +8,9 @@ fn main() {
     let blur = blur(&img, 1.0);
 
     // 亚像素边缘检测
-    let edges = subpixel_edge_detection(&blur, 50.0, 0.6);
+    let edges = canny_based_subpixel_edges(&blur, 20.0, 80.0, 0.7);
 
-    // 可视化结果（放大5倍显示）
+    //
     let result = visualize_edges(&img, &edges);
     result.save("test_image/subpixel_edges.png").unwrap();
 

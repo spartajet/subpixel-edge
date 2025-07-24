@@ -1,78 +1,11 @@
-use std::f32::consts::PI;
-
-use image::{GrayImage, Luma, Pixel, Rgba, RgbaImage, buffer::ConvertBuffer};
+use image::{GenericImageView, GrayImage, Luma, Pixel, Rgb, RgbImage, buffer::ConvertBuffer};
 use imageproc::{
     definitions::Image,
-    gradients::{horizontal_sobel, sobel_gradient_map, sobel_gradients, vertical_sobel},
+    edges::canny,
+    gradients::{horizontal_sobel, sobel_gradients, vertical_sobel},
 };
-
-/// 非极大值抑制
-fn non_maximum_suppression(
-    gx_data: &[f32],
-    gy_data: &[f32],
-    mag_data: &[f32],
-    width: u32,
-    height: u32,
-) -> Vec<f32> {
-    let mut nms_mag = vec![0.0; mag_data.len()];
-
-    // 遍历内部像素（跳过边界）
-    for y in 1..(height - 1) as usize {
-        for x in 1..(width - 1) as usize {
-            let idx = y * width as usize + x;
-            let mag = mag_data[idx];
-
-            if mag <= 0.0 {
-                continue;
-            }
-
-            // 计算梯度方向（角度）
-            let gx = gx_data[idx];
-            let gy = gy_data[idx];
-            let angle = gy.atan2(gx) * 180.0 / PI; // 转换为度
-
-            // 标准化角度到[0, 180)
-            let angle = if angle < 0.0 { angle + 180.0 } else { angle };
-
-            // 确定相邻像素位置
-            let (mut x1, mut y1, mut x2, mut y2) = (x, y, x, y);
-
-            // 根据角度确定相邻像素
-            if (0.0..22.5).contains(&angle) || (157.5..180.0).contains(&angle) {
-                // 水平方向
-                x1 = x + 1;
-                x2 = x - 1;
-            } else if (22.5..67.5).contains(&angle) {
-                // 45度方向
-                x1 = x + 1;
-                y1 = y - 1;
-                x2 = x - 1;
-                y2 = y + 1;
-            } else if (67.5..112.5).contains(&angle) {
-                // 垂直方向
-                y1 = y - 1;
-                y2 = y + 1;
-            } else if (112.5..157.5).contains(&angle) {
-                // 135度方向
-                x1 = x - 1;
-                y1 = y - 1;
-                x2 = x + 1;
-                y2 = y + 1;
-            }
-
-            // 获取相邻像素梯度幅值
-            let mag1 = mag_data[y1 * width as usize + x1];
-            let mag2 = mag_data[y2 * width as usize + x2];
-
-            // 如果当前像素是局部极大值，则保留
-            if mag >= mag1 && mag >= mag2 {
-                nms_mag[idx] = mag;
-            }
-        }
-    }
-
-    nms_mag
-}
+use rayon::prelude::*;
+use std::f32::consts::PI;
 
 /// 双线性插值函数
 fn bilinear_interpolation(data: &[f32], width: u32, height: u32, x: f32, y: f32) -> f32 {
@@ -87,10 +20,10 @@ fn bilinear_interpolation(data: &[f32], width: u32, height: u32, x: f32, y: f32)
     }
 
     // 获取四个相邻点
-    let p00 = data[y0 as usize * width as usize + x0 as usize];
-    let p10 = data[y0 as usize * width as usize + x1 as usize];
-    let p01 = data[y1 as usize * width as usize + x0 as usize];
-    let p11 = data[y1 as usize * width as usize + x1 as usize];
+    let p00 = data[(y0 as u32 * width + x0 as u32) as usize];
+    let p10 = data[(y0 as u32 * width + x1 as u32) as usize];
+    let p01 = data[(y1 as u32 * width + x0 as u32) as usize];
+    let p11 = data[(y1 as u32 * width + x1 as u32) as usize];
 
     // 计算权重
     let dx = x - x0 as f32;
@@ -100,33 +33,91 @@ fn bilinear_interpolation(data: &[f32], width: u32, height: u32, x: f32, y: f32)
     p00 * (1.0 - dx) * (1.0 - dy) + p10 * dx * (1.0 - dy) + p01 * (1.0 - dx) * dy + p11 * dx * dy
 }
 
-/// 亚像素边缘检测
-///
-/// # 参数
-/// - `image`: 输入灰度图像
-/// - `gradient_threshold`: 梯度幅值阈值
-/// - `edge_point_threshold`: 有效边缘点阈值
-///
-/// # 返回
-/// 亚像素边缘点列表 `Vec<(f32, f32)>`
-pub fn subpixel_edge_detection(
+/// 在3x3区域内进行亚像素边缘定位
+fn subpixel_in_3x3(
+    x: u32,
+    y: u32,
+    gx_data: &[f32],
+    gy_data: &[f32],
+    mag_data: &[f32],
+    width: u32,
+    height: u32,
+    edge_point_threshold: f32,
+) -> Option<(f32, f32)> {
+    let idx = (y * width + x) as usize;
+    let mag = mag_data[idx];
+
+    // 计算梯度方向
+    let gx_val = gx_data[idx];
+    let gy_val = gy_data[idx];
+    let theta = gy_val.atan2(gx_val);
+    let dx = theta.cos();
+    let dy = theta.sin();
+
+    // 计算梯度方向上的偏移点
+    let x1 = x as f32 + 0.5 * dx;
+    let y1 = y as f32 + 0.5 * dy;
+    let x2 = x as f32 - 0.5 * dx;
+    let y2 = y as f32 - 0.5 * dy;
+
+    // 边界检查
+    if x1 < 1.0
+        || x1 >= (width - 1) as f32
+        || y1 < 1.0
+        || y1 >= (height - 1) as f32
+        || x2 < 1.0
+        || x2 >= (width - 1) as f32
+        || y2 < 1.0
+        || y2 >= (height - 1) as f32
+    {
+        return None;
+    }
+
+    // 双线性插值获取梯度幅值
+    let m1 = bilinear_interpolation(mag_data, width, height, x1, y1);
+    let m2 = bilinear_interpolation(mag_data, width, height, x2, y2);
+
+    // 抛物线拟合参数
+    let a = 2.0 * (m1 + m2 - 2.0 * mag);
+    if a >= 0.0 {
+        // 确保是极大值点
+        return None;
+    }
+
+    // 计算亚像素偏移
+    let offset = (m2 - m1) / (4.0 * (m1 + m2 - 2.0 * mag));
+
+    // 过滤无效偏移
+    if offset.abs() > edge_point_threshold {
+        return None;
+    }
+
+    // 计算亚像素坐标
+    let sub_x = x as f32 + offset * dx;
+    let sub_y = y as f32 + offset * dy;
+
+    Some((sub_x, sub_y))
+}
+
+/// 基于Canny的亚像素边缘检测
+pub fn canny_based_subpixel_edges(
     image: &GrayImage,
-    gradient_threshold: f32,
+    low_threshold: f32,
+    high_threshold: f32,
     edge_point_threshold: f32,
 ) -> Vec<(f32, f32)> {
     let (width, height) = image.dimensions();
 
-    // 计算梯度
-    // let (gx, gy) = sobel_gradient_map(image, |p| p as f32);
-    // let gx_data = gx.as_raw();
-    // let gy_data = gy.as_raw();
-    //
-    let gx = horizontal_sobel(image);
-    let gy = vertical_sobel(image);
+    // 步骤1：使用Canny检测像素级边缘
+    let canny_edges = canny(image, low_threshold, high_threshold);
 
-    // 将梯度转换为f32并存储为Vec
-    let gx_data: Vec<f32> = gx.iter().map(|&p| p as f32).collect();
-    let gy_data: Vec<f32> = gy.iter().map(|&p| p as f32).collect();
+    // 步骤2：计算梯度信息
+    // let (gx_image, gy_image) = sobel_gradients(image);
+    let gx_image = horizontal_sobel(&image);
+    let gy_image = vertical_sobel(&image);
+
+    let gx_data: Vec<f32> = gx_image.pixels().map(|p| p[0] as f32).collect();
+    let gy_data: Vec<f32> = gy_image.pixels().map(|p| p[0] as f32).collect();
 
     // 计算梯度幅值
     let mag_data: Vec<f32> = gx_data
@@ -135,81 +126,89 @@ pub fn subpixel_edge_detection(
         .map(|(gx, gy)| (gx.powi(2) + gy.powi(2)).sqrt())
         .collect();
 
-    let mag_data = non_maximum_suppression(&mag_data, &gx_data, &gy_data, width, height);
-
     let mut edge_points = Vec::new();
 
-    // 遍历像素（跳过边界）
+    // 步骤3：在Canny边缘点上进行亚像素定位
     for y in 1..(height - 1) {
         for x in 1..(width - 1) {
-            let idx = (y * width + x) as usize;
-            let mag = mag_data[idx];
-
-            // 过滤低梯度点
-            if mag < gradient_threshold {
-                continue;
+            // 只处理Canny检测到的边缘点
+            if canny_edges.get_pixel(x, y)[0] > 0 {
+                if let Some(point) = subpixel_in_3x3(
+                    x,
+                    y,
+                    &gx_data,
+                    &gy_data,
+                    &mag_data,
+                    width,
+                    height,
+                    edge_point_threshold,
+                ) {
+                    edge_points.push(point);
+                }
             }
-
-            // 计算梯度方向
-            let gx_val = gx_data[idx];
-            let gy_val = gy_data[idx];
-            let theta = gy_val.atan2(gx_val);
-            let dx = theta.cos();
-            let dy = theta.sin();
-
-            // 计算梯度方向上的偏移点
-            let x1 = x as f32 + 0.5 * dx;
-            let y1 = y as f32 + 0.5 * dy;
-            let x2 = x as f32 - 0.5 * dx;
-            let y2 = y as f32 - 0.5 * dy;
-
-            // 边界检查
-            if x1 < 1.0
-                || x1 >= (width - 1) as f32
-                || y1 < 1.0
-                || y1 >= (height - 1) as f32
-                || x2 < 1.0
-                || x2 >= (width - 1) as f32
-                || y2 < 1.0
-                || y2 >= (height - 1) as f32
-            {
-                continue;
-            }
-
-            // 双线性插值获取梯度幅值
-            let m1 = bilinear_interpolation(&mag_data, width, height, x1, y1);
-            let m2 = bilinear_interpolation(&mag_data, width, height, x2, y2);
-
-            // 抛物线拟合参数
-            let a = 2.0 * (m1 + m2 - 2.0 * mag);
-            if a >= 0.0 {
-                // 确保是极大值点
-                continue;
-            }
-
-            // 计算亚像素偏移
-            let offset = (m2 - m1) / (4.0 * (m1 + m2 - 2.0 * mag));
-
-            // 过滤无效偏移
-            if offset.abs() > edge_point_threshold {
-                continue;
-            }
-
-            // 计算亚像素坐标
-            let sub_x = x as f32 + offset * dx;
-            let sub_y = y as f32 + offset * dy;
-
-            edge_points.push((sub_x, sub_y));
         }
     }
 
     edge_points
 }
 
-/// 可视化亚像素边缘（调试用）
-pub fn visualize_edges(image: &GrayImage, edge_points: &[(f32, f32)]) -> RgbaImage {
-    let mut canvas: RgbaImage = image.convert();
-    let red = Rgba([255, 0, 0, 100]);
+/// 并行版本的Canny亚像素边缘检测
+pub fn canny_based_subpixel_edges_parallel(
+    image: &GrayImage,
+    low_threshold: f32,
+    high_threshold: f32,
+    edge_point_threshold: f32,
+) -> Vec<(f32, f32)> {
+    let (width, height) = image.dimensions();
+
+    // 步骤1：使用Canny检测像素级边缘
+    let canny_edges = canny(image, low_threshold, high_threshold);
+
+    // 步骤2：计算梯度信息
+    let gx_image = horizontal_sobel(&image);
+    let gy_image = vertical_sobel(&image);
+    let gx_data: Vec<f32> = gx_image.pixels().map(|p| p[0] as f32).collect();
+    let gy_data: Vec<f32> = gy_image.pixels().map(|p| p[0] as f32).collect();
+
+    // 计算梯度幅值
+    let mag_data: Vec<f32> = gx_data
+        .iter()
+        .zip(gy_data.iter())
+        .map(|(gx, gy)| (gx.powi(2) + gy.powi(2)).sqrt())
+        .collect();
+
+    // 收集所有Canny边缘点
+    let mut canny_points = Vec::new();
+    for y in 1..(height - 1) {
+        for x in 1..(width - 1) {
+            if canny_edges.get_pixel(x, y)[0] > 0 {
+                canny_points.push((x, y));
+            }
+        }
+    }
+
+    // 并行处理每个边缘点
+    canny_points
+        .into_par_iter()
+        .filter_map(|(x, y)| {
+            subpixel_in_3x3(
+                x,
+                y,
+                &gx_data,
+                &gy_data,
+                &mag_data,
+                width,
+                height,
+                edge_point_threshold,
+            )
+        })
+        .collect()
+}
+
+/// 可视化亚像素边缘
+pub fn visualize_edges(image: &GrayImage, edge_points: &[(f32, f32)]) -> RgbImage {
+    let mut canvas: RgbImage = image.convert();
+    let red = Rgb([255u8, 0, 0]);
 
     for &(x, y) in edge_points {
         let sx = x as i32;
@@ -219,6 +218,5 @@ pub fn visualize_edges(image: &GrayImage, edge_points: &[(f32, f32)]) -> RgbaIma
             canvas.put_pixel(sx as u32, sy as u32, red);
         }
     }
-
     canvas
 }
