@@ -1,266 +1,11 @@
+use image::{GenericImageView, GrayImage, ImageBuffer, Luma, Rgb, RgbImage, buffer::ConvertBuffer};
+use imageproc::definitions::{HasBlack, HasWhite};
+use log::debug;
+use rayon::prelude::*;
 use std::{
     f32::consts::PI,
     sync::{Arc, Mutex},
 };
-
-use image::{GenericImageView, GrayImage, ImageBuffer, Luma, Rgb, RgbImage, buffer::ConvertBuffer};
-use imageproc::{
-    definitions::{HasBlack, HasWhite},
-    edges::canny,
-    gradients::{horizontal_sobel, vertical_sobel},
-};
-use log::debug;
-use rayon::prelude::*;
-
-/// 双线性插值函数
-fn bilinear_interpolation(data: &[f32], width: u32, height: u32, x: f32, y: f32) -> f32 {
-    let x0 = x.floor() as i32;
-    let y0 = y.floor() as i32;
-    let x1 = x0 + 1;
-    let y1 = y0 + 1;
-
-    // 边界检查
-    if x0 < 0 || y0 < 0 || x1 >= width as i32 || y1 >= height as i32 {
-        return 0.0;
-    }
-
-    // 获取四个相邻点
-    let p00 = data[(y0 as u32 * width + x0 as u32) as usize];
-    let p10 = data[(y0 as u32 * width + x1 as u32) as usize];
-    let p01 = data[(y1 as u32 * width + x0 as u32) as usize];
-    let p11 = data[(y1 as u32 * width + x1 as u32) as usize];
-
-    // 计算权重
-    let dx = x - x0 as f32;
-    let dy = y - y0 as f32;
-
-    // 双线性插值
-    p00 * (1.0 - dx) * (1.0 - dy) + p10 * dx * (1.0 - dy) + p01 * (1.0 - dx) * dy + p11 * dx * dy
-}
-
-/// 在3x3区域内进行亚像素边缘定位
-#[allow(clippy::too_many_arguments)]
-fn subpixel_in_3x3(
-    x: u32,
-    y: u32,
-    gx_data: &[f32],
-    gy_data: &[f32],
-    mag_data: &[f32],
-    width: u32,
-    height: u32,
-    edge_point_threshold: f32,
-) -> Option<(f32, f32)> {
-    let idx = (y * width + x) as usize;
-    let mag = mag_data[idx];
-
-    // 计算梯度方向
-    let gx_val = gx_data[idx];
-    let gy_val = gy_data[idx];
-    let theta = gy_val.atan2(gx_val);
-    let dx = theta.cos();
-    let dy = theta.sin();
-
-    // 计算梯度方向上的偏移点
-    let x1 = x as f32 + 0.5 * dx;
-    let y1 = y as f32 + 0.5 * dy;
-    let x2 = x as f32 - 0.5 * dx;
-    let y2 = y as f32 - 0.5 * dy;
-
-    // 边界检查
-    if x1 < 1.0
-        || x1 >= (width - 1) as f32
-        || y1 < 1.0
-        || y1 >= (height - 1) as f32
-        || x2 < 1.0
-        || x2 >= (width - 1) as f32
-        || y2 < 1.0
-        || y2 >= (height - 1) as f32
-    {
-        return None;
-    }
-
-    // 双线性插值获取梯度幅值
-    let m1 = bilinear_interpolation(mag_data, width, height, x1, y1);
-    let m2 = bilinear_interpolation(mag_data, width, height, x2, y2);
-
-    // 抛物线拟合参数
-    let a = 2.0 * (m1 + m2 - 2.0 * mag);
-    if a >= 0.0 {
-        // 确保是极大值点
-        return None;
-    }
-
-    // 计算亚像素偏移
-    let offset = (m2 - m1) / (4.0 * (m1 + m2 - 2.0 * mag));
-
-    // 过滤无效偏移
-    if offset.abs() > edge_point_threshold {
-        return None;
-    }
-
-    // 计算亚像素坐标
-    let sub_x = x as f32 + offset * dx;
-    let sub_y = y as f32 + offset * dy;
-
-    Some((sub_x, sub_y))
-}
-
-// /// 基于Canny的亚像素边缘检测
-// pub fn canny_based_subpixel_edges(
-//     image: &GrayImage,
-//     low_threshold: f32,
-//     high_threshold: f32,
-//     edge_point_threshold: f32,
-// ) -> Vec<(f32, f32)> {
-//     let (width, height) = image.dimensions();
-
-//     // 步骤1：使用Canny检测像素级边缘
-//     let canny_edges = canny(image, low_threshold, high_threshold);
-
-//     // 步骤2：计算梯度信息
-//     // let (gx_image, gy_image) = sobel_gradients(image);
-//     let gx_image = horizontal_sobel(image);
-//     let gy_image = vertical_sobel(image);
-
-//     let gx_data: Vec<f32> = gx_image.pixels().map(|p| p[0] as f32).collect();
-//     let gy_data: Vec<f32> = gy_image.pixels().map(|p| p[0] as f32).collect();
-
-//     // 计算梯度幅值 - 并行化
-//     let mag_data: Vec<f32> = gx_data
-//         .par_iter()
-//         .zip(gy_data.par_iter())
-//         .map(|(gx, gy)| (gx.powi(2) + gy.powi(2)).sqrt())
-//         .collect();
-
-//     // 收集所有Canny边缘点 - 并行化
-//     let canny_points: Vec<(u32, u32)> = (1..(height - 1))
-//         .into_par_iter()
-//         .flat_map(|y| {
-//             let canny_edges = &canny_edges;
-//             (1..(width - 1)).into_par_iter().filter_map(move |x| {
-//                 if canny_edges.get_pixel(x, y)[0] > 0 {
-//                     Some((x, y))
-//                 } else {
-//                     None
-//                 }
-//             })
-//         })
-//         .collect();
-
-//     // 步骤3：在Canny边缘点上进行亚像素定位 - 并行化
-//     canny_points
-//         .into_par_iter()
-//         .filter_map(|(x, y)| {
-//             subpixel_in_3x3(
-//                 x,
-//                 y,
-//                 &gx_data,
-//                 &gy_data,
-//                 &mag_data,
-//                 width,
-//                 height,
-//                 edge_point_threshold,
-//             )
-//         })
-//         .collect()
-// }
-
-// /// 并行版本的Canny亚像素边缘检测
-// pub fn canny_based_subpixel_edges_parallel(
-//     image: &GrayImage,
-//     low_threshold: f32,
-//     high_threshold: f32,
-//     edge_point_threshold: f32,
-// ) -> Vec<(f32, f32)> {
-//     let (width, height) = image.dimensions();
-
-//     // 步骤1：使用Canny检测像素级边缘
-//     let canny_edges = canny(image, low_threshold, high_threshold);
-
-//     // 步骤2：计算梯度信息
-//     let gx_image = horizontal_sobel(image);
-//     let gy_image = vertical_sobel(image);
-//     // 并行化数据转换
-//     let gx_data: Vec<f32> = gx_image
-//         .pixels()
-//         .collect::<Vec<_>>()
-//         .into_par_iter()
-//         .map(|p| p[0] as f32)
-//         .collect();
-//     let gy_data: Vec<f32> = gy_image
-//         .pixels()
-//         .collect::<Vec<_>>()
-//         .into_par_iter()
-//         .map(|p| p[0] as f32)
-//         .collect();
-
-//     // 计算梯度幅值 - 并行化
-//     let mag_data: Vec<f32> = gx_data
-//         .par_iter()
-//         .zip(gy_data.par_iter())
-//         .map(|(gx, gy)| (gx.powi(2) + gy.powi(2)).sqrt())
-//         .collect();
-
-//     // 收集所有Canny边缘点 - 并行化
-//     let canny_points: Vec<(u32, u32)> = (1..(height - 1))
-//         .into_par_iter()
-//         .flat_map(|y| {
-//             let canny_edges = &canny_edges;
-//             (1..(width - 1)).into_par_iter().filter_map(move |x| {
-//                 if canny_edges.get_pixel(x, y)[0] > 0 {
-//                     Some((x, y))
-//                 } else {
-//                     None
-//                 }
-//             })
-//         })
-//         .collect();
-
-//     // 并行处理每个边缘点
-//     canny_points
-//         .into_par_iter()
-//         .filter_map(|(x, y)| {
-//             subpixel_in_3x3(
-//                 x,
-//                 y,
-//                 &gx_data,
-//                 &gy_data,
-//                 &mag_data,
-//                 width,
-//                 height,
-//                 edge_point_threshold,
-//             )
-//         })
-//         .collect()
-// }
-
-/// 可视化亚像素边缘
-pub fn visualize_edges(image: &GrayImage, edge_points: &[(f32, f32)]) -> RgbImage {
-    let mut canvas: RgbImage = image.convert();
-    let red = Rgb([255u8, 0, 0]);
-
-    // 并行化边缘点绘制（注意：这里需要同步写入，所以使用 for_each 而不是直接修改）
-    // 为了线程安全，我们收集有效点然后串行绘制
-    let valid_points: Vec<(u32, u32)> = edge_points
-        .par_iter()
-        .filter_map(|&(x, y)| {
-            let sx = x as i32;
-            let sy = y as i32;
-            if sx >= 0 && sy >= 0 && sx < canvas.width() as i32 && sy < canvas.height() as i32 {
-                Some((sx as u32, sy as u32))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // 串行绘制（避免并发写入同一个像素的问题）
-    for (sx, sy) in valid_points {
-        canvas.put_pixel(sx, sy, red);
-    }
-
-    canvas
-}
 
 /// 高性能版本 - 添加一个新的完全优化的函数
 pub fn canny_based_subpixel_edges_optimized(
@@ -319,7 +64,7 @@ pub fn canny_based_subpixel_edges_optimized(
     debug!("thinned ok");
 
     // 4. Hysteresis to filter out edges based on thresholds.
-    let canny_edge_points = hysteresis_original(&thinned, low_threshold, high_threshold);
+    let canny_edge_points = hysteresis(&thinned, low_threshold, high_threshold);
 
     debug!("canny_edge_points ok");
 
@@ -469,7 +214,7 @@ fn non_maximum_suppression(
 
 /// Filter out edges with the thresholds.
 /// Non-recursive breadth-first search.
-fn hysteresis_original(
+fn hysteresis(
     input: &ImageBuffer<Luma<f32>, Vec<f32>>,
     low_thresh: f32,
     high_thresh: f32,
@@ -525,131 +270,123 @@ fn hysteresis_original(
     result_edge_points
 }
 
-fn hysteresis(
-    input: &ImageBuffer<Luma<f32>, Vec<f32>>,
-    low_thresh: f32,
-    high_thresh: f32,
-) -> Vec<(u32, u32)> {
-    let width = input.width();
-    let height = input.height();
+/// 可视化亚像素边缘
+pub fn visualize_edges(image: &GrayImage, edge_points: &[(f32, f32)]) -> RgbImage {
+    let mut canvas: RgbImage = image.convert();
+    let red = Rgb([255u8, 0, 0]);
 
-    // Use Arc<Mutex<>> for thread-safe access to the output image
-    let out = Arc::new(Mutex::new(ImageBuffer::from_pixel(
-        width,
-        height,
-        Luma::<u8>::black(),
-    )));
-
-    // Find all strong edge pixels (above high threshold) in parallel
-    let strong_edges: Vec<(u32, u32)> = (1..height - 1)
-        .into_par_iter()
-        .flat_map(|y| {
-            (1..width - 1).into_par_iter().filter_map(move |x| {
-                let pixel_value = input.get_pixel(x, y)[0];
-                if pixel_value >= high_thresh {
-                    Some((x, y))
-                } else {
-                    None
-                }
-            })
+    // 并行化边缘点绘制（注意：这里需要同步写入，所以使用 for_each 而不是直接修改）
+    // 为了线程安全，我们收集有效点然后串行绘制
+    let valid_points: Vec<(u32, u32)> = edge_points
+        .par_iter()
+        .filter_map(|&(x, y)| {
+            let sx = x as i32;
+            let sy = y as i32;
+            if sx >= 0 && sy >= 0 && sx < canvas.width() as i32 && sy < canvas.height() as i32 {
+                Some((sx as u32, sy as u32))
+            } else {
+                None
+            }
         })
         .collect();
 
-    // Mark strong edges and collect result points in parallel
-    let result_edge_points = Arc::new(Mutex::new(Vec::new()));
+    // 串行绘制（避免并发写入同一个像素的问题）
+    for (sx, sy) in valid_points {
+        canvas.put_pixel(sx, sy, red);
+    }
 
-    strong_edges.par_iter().for_each(|&(start_x, start_y)| {
-        let mut local_edges = Vec::new();
-        let mut local_stack = vec![(start_x, start_y)];
-
-        // Check if this pixel is already processed by another thread
-        {
-            let mut out_guard = out.lock().unwrap();
-            if out_guard.get_pixel(start_x, start_y)[0] != 0 {
-                return; // Already processed
-            }
-            out_guard.put_pixel(start_x, start_y, Luma::<u8>::white());
-        }
-
-        // Process connected component using depth-first search
-        while let Some((x, y)) = local_stack.pop() {
-            local_edges.push((x, y));
-
-            // Check all 8 neighbors with proper bounds checking
-            let neighbors = [
-                (x.wrapping_sub(1), y.wrapping_sub(1)),
-                (x, y.wrapping_sub(1)),
-                (x + 1, y.wrapping_sub(1)),
-                (x.wrapping_sub(1), y),
-                (x + 1, y),
-                (x.wrapping_sub(1), y + 1),
-                (x, y + 1),
-                (x + 1, y + 1),
-            ];
-
-            for &(nx, ny) in &neighbors {
-                // Bounds checking - check for overflow and out of bounds
-                if nx >= width || ny >= height || nx == u32::MAX || ny == u32::MAX {
-                    continue;
-                }
-                // Also skip border pixels
-                if nx == 0 || ny == 0 || nx >= width - 1 || ny >= height - 1 {
-                    continue;
-                }
-
-                // Check if neighbor meets low threshold and hasn't been processed
-                let neighbor_value = input.get_pixel(nx, ny)[0];
-                if neighbor_value >= low_thresh {
-                    let mut out_guard = out.lock().unwrap();
-                    if out_guard.get_pixel(nx, ny)[0] == 0 {
-                        out_guard.put_pixel(nx, ny, Luma::<u8>::white());
-                        local_stack.push((nx, ny));
-                    }
-                }
-            }
-        }
-
-        // Add local results to global result
-        if !local_edges.is_empty() {
-            let mut result_guard = result_edge_points.lock().unwrap();
-            result_guard.extend(local_edges);
-        }
-    });
-
-    // Extract final result
-    Arc::try_unwrap(result_edge_points)
-        .unwrap()
-        .into_inner()
-        .unwrap()
+    canvas
 }
 
-/// Performance comparison function for hysteresis optimization
-pub fn compare_hysteresis_performance(
-    input: &ImageBuffer<Luma<f32>, Vec<f32>>,
-    low_thresh: f32,
-    high_thresh: f32,
-) -> (
-    std::time::Duration,
-    std::time::Duration,
-    Vec<(u32, u32)>,
-    Vec<(u32, u32)>,
-) {
-    use std::time::Instant;
+/// 双线性插值函数
+fn bilinear_interpolation(data: &[f32], width: u32, height: u32, x: f32, y: f32) -> f32 {
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
 
-    // Test original implementation
-    let start = Instant::now();
-    let original_result = hysteresis_original(input, low_thresh, high_thresh);
-    let original_time = start.elapsed();
+    // 边界检查
+    if x0 < 0 || y0 < 0 || x1 >= width as i32 || y1 >= height as i32 {
+        return 0.0;
+    }
 
-    // Test optimized implementation
-    let start = Instant::now();
-    let optimized_result = hysteresis(input, low_thresh, high_thresh);
-    let optimized_time = start.elapsed();
+    // 获取四个相邻点
+    let p00 = data[(y0 as u32 * width + x0 as u32) as usize];
+    let p10 = data[(y0 as u32 * width + x1 as u32) as usize];
+    let p01 = data[(y1 as u32 * width + x0 as u32) as usize];
+    let p11 = data[(y1 as u32 * width + x1 as u32) as usize];
 
-    (
-        original_time,
-        optimized_time,
-        original_result,
-        optimized_result,
-    )
+    // 计算权重
+    let dx = x - x0 as f32;
+    let dy = y - y0 as f32;
+
+    // 双线性插值
+    p00 * (1.0 - dx) * (1.0 - dy) + p10 * dx * (1.0 - dy) + p01 * (1.0 - dx) * dy + p11 * dx * dy
+}
+
+/// 在3x3区域内进行亚像素边缘定位
+#[allow(clippy::too_many_arguments)]
+fn subpixel_in_3x3(
+    x: u32,
+    y: u32,
+    gx_data: &[f32],
+    gy_data: &[f32],
+    mag_data: &[f32],
+    width: u32,
+    height: u32,
+    edge_point_threshold: f32,
+) -> Option<(f32, f32)> {
+    let idx = (y * width + x) as usize;
+    let mag = mag_data[idx];
+
+    // 计算梯度方向
+    let gx_val = gx_data[idx];
+    let gy_val = gy_data[idx];
+    let theta = gy_val.atan2(gx_val);
+    let dx = theta.cos();
+    let dy = theta.sin();
+
+    // 计算梯度方向上的偏移点
+    let x1 = x as f32 + 0.5 * dx;
+    let y1 = y as f32 + 0.5 * dy;
+    let x2 = x as f32 - 0.5 * dx;
+    let y2 = y as f32 - 0.5 * dy;
+
+    // 边界检查
+    if x1 < 1.0
+        || x1 >= (width - 1) as f32
+        || y1 < 1.0
+        || y1 >= (height - 1) as f32
+        || x2 < 1.0
+        || x2 >= (width - 1) as f32
+        || y2 < 1.0
+        || y2 >= (height - 1) as f32
+    {
+        return None;
+    }
+
+    // 双线性插值获取梯度幅值
+    let m1 = bilinear_interpolation(mag_data, width, height, x1, y1);
+    let m2 = bilinear_interpolation(mag_data, width, height, x2, y2);
+
+    // 抛物线拟合参数
+    let a = 2.0 * (m1 + m2 - 2.0 * mag);
+    if a >= 0.0 {
+        // 确保是极大值点
+        return None;
+    }
+
+    // 计算亚像素偏移
+    let offset = (m2 - m1) / (4.0 * (m1 + m2 - 2.0 * mag));
+
+    // 过滤无效偏移
+    if offset.abs() > edge_point_threshold {
+        return None;
+    }
+
+    // 计算亚像素坐标
+    let sub_x = x as f32 + offset * dx;
+    let sub_y = y as f32 + offset * dy;
+
+    Some((sub_x, sub_y))
 }

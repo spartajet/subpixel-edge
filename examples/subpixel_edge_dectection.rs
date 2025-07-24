@@ -1,5 +1,3 @@
-mod hysteresis_performance;
-
 use std::time::Instant;
 
 use env_logger::Builder;
