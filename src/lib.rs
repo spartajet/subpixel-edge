@@ -1,8 +1,78 @@
+use std::f32::consts::PI;
+
 use image::{GrayImage, Luma, Pixel, Rgba, RgbaImage, buffer::ConvertBuffer};
 use imageproc::{
     definitions::Image,
     gradients::{horizontal_sobel, sobel_gradient_map, sobel_gradients, vertical_sobel},
 };
+
+/// 非极大值抑制
+fn non_maximum_suppression(
+    gx_data: &[f32],
+    gy_data: &[f32],
+    mag_data: &[f32],
+    width: u32,
+    height: u32,
+) -> Vec<f32> {
+    let mut nms_mag = vec![0.0; mag_data.len()];
+
+    // 遍历内部像素（跳过边界）
+    for y in 1..(height - 1) as usize {
+        for x in 1..(width - 1) as usize {
+            let idx = y * width as usize + x;
+            let mag = mag_data[idx];
+
+            if mag <= 0.0 {
+                continue;
+            }
+
+            // 计算梯度方向（角度）
+            let gx = gx_data[idx];
+            let gy = gy_data[idx];
+            let angle = gy.atan2(gx) * 180.0 / PI; // 转换为度
+
+            // 标准化角度到[0, 180)
+            let angle = if angle < 0.0 { angle + 180.0 } else { angle };
+
+            // 确定相邻像素位置
+            let (mut x1, mut y1, mut x2, mut y2) = (x, y, x, y);
+
+            // 根据角度确定相邻像素
+            if (0.0..22.5).contains(&angle) || (157.5..180.0).contains(&angle) {
+                // 水平方向
+                x1 = x + 1;
+                x2 = x - 1;
+            } else if (22.5..67.5).contains(&angle) {
+                // 45度方向
+                x1 = x + 1;
+                y1 = y - 1;
+                x2 = x - 1;
+                y2 = y + 1;
+            } else if (67.5..112.5).contains(&angle) {
+                // 垂直方向
+                y1 = y - 1;
+                y2 = y + 1;
+            } else if (112.5..157.5).contains(&angle) {
+                // 135度方向
+                x1 = x - 1;
+                y1 = y - 1;
+                x2 = x + 1;
+                y2 = y + 1;
+            }
+
+            // 获取相邻像素梯度幅值
+            let mag1 = mag_data[y1 * width as usize + x1];
+            let mag2 = mag_data[y2 * width as usize + x2];
+
+            // 如果当前像素是局部极大值，则保留
+            if mag >= mag1 && mag >= mag2 {
+                nms_mag[idx] = mag;
+            }
+        }
+    }
+
+    nms_mag
+}
 
 /// 双线性插值函数
 fn bilinear_interpolation(data: &[f32], width: u32, height: u32, x: f32, y: f32) -> f32 {
@@ -64,6 +134,8 @@ pub fn subpixel_edge_detection(
         .zip(gy_data.iter())
         .map(|(gx, gy)| (gx.powi(2) + gy.powi(2)).sqrt())
         .collect();
+
+    let mag_data = non_maximum_suppression(&mag_data, &gx_data, &gy_data, width, height);
 
     let mut edge_points = Vec::new();
 
