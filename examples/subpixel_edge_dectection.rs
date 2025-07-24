@@ -1,3 +1,5 @@
+mod hysteresis_performance;
+
 use std::time::Instant;
 
 use env_logger::Builder;
@@ -8,7 +10,7 @@ use subpixel_edge::{canny_based_subpixel_edges_optimized, visualize_edges};
 fn main() {
     Builder::from_default_env().format_timestamp_nanos().init();
     // 加载图像
-    let img = open("test_image/edge.png").unwrap().to_luma8();
+    let img = open("test_image/edge-small.png").unwrap().to_luma8();
 
     let blur = blur(&img, 1.0);
 

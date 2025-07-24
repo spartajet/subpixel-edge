@@ -319,7 +319,7 @@ pub fn canny_based_subpixel_edges_optimized(
     debug!("thinned ok");
 
     // 4. Hysteresis to filter out edges based on thresholds.
-    let canny_edge_points = hysteresis(&thinned, low_threshold, high_threshold);
+    let canny_edge_points = hysteresis_original(&thinned, low_threshold, high_threshold);
 
     debug!("canny_edge_points ok");
 
@@ -341,7 +341,7 @@ pub fn canny_based_subpixel_edges_optimized(
         .collect()
 }
 
-fn parallel_sobel_gradients(image: &GrayImage) -> (Vec<f32>, Vec<f32>) {
+pub fn parallel_sobel_gradients(image: &GrayImage) -> (Vec<f32>, Vec<f32>) {
     let (width, height) = image.dimensions();
     let gx = Arc::new(Mutex::new(vec![0.0; (width * height) as usize]));
     let gy = Arc::new(Mutex::new(vec![0.0; (width * height) as usize]));
@@ -469,7 +469,7 @@ fn non_maximum_suppression(
 
 /// Filter out edges with the thresholds.
 /// Non-recursive breadth-first search.
-fn hysteresis(
+fn hysteresis_original(
     input: &ImageBuffer<Luma<f32>, Vec<f32>>,
     low_thresh: f32,
     high_thresh: f32,
@@ -495,12 +495,21 @@ fn hysteresis(
                         (nx + 1, ny),
                         (nx + 1, ny + 1),
                         (nx, ny + 1),
-                        (nx - 1, ny - 1),
-                        (nx - 1, ny),
-                        (nx - 1, ny + 1),
+                        (nx.wrapping_sub(1), ny.wrapping_sub(1)),
+                        (nx.wrapping_sub(1), ny),
+                        (nx.wrapping_sub(1), ny + 1),
                     ];
 
                     for neighbor_idx in &neighbor_indices {
+                        // Bounds checking
+                        if neighbor_idx.0 >= input.width()
+                            || neighbor_idx.1 >= input.height()
+                            || neighbor_idx.0 == u32::MAX
+                            || neighbor_idx.1 == u32::MAX
+                        {
+                            continue;
+                        }
+
                         let in_neighbor = *input.get_pixel(neighbor_idx.0, neighbor_idx.1);
                         let out_neighbor = *out.get_pixel(neighbor_idx.0, neighbor_idx.1);
                         if in_neighbor[0] >= low_thresh && out_neighbor[0] == 0 {
@@ -514,4 +523,133 @@ fn hysteresis(
         }
     }
     result_edge_points
+}
+
+fn hysteresis(
+    input: &ImageBuffer<Luma<f32>, Vec<f32>>,
+    low_thresh: f32,
+    high_thresh: f32,
+) -> Vec<(u32, u32)> {
+    let width = input.width();
+    let height = input.height();
+
+    // Use Arc<Mutex<>> for thread-safe access to the output image
+    let out = Arc::new(Mutex::new(ImageBuffer::from_pixel(
+        width,
+        height,
+        Luma::<u8>::black(),
+    )));
+
+    // Find all strong edge pixels (above high threshold) in parallel
+    let strong_edges: Vec<(u32, u32)> = (1..height - 1)
+        .into_par_iter()
+        .flat_map(|y| {
+            (1..width - 1).into_par_iter().filter_map(move |x| {
+                let pixel_value = input.get_pixel(x, y)[0];
+                if pixel_value >= high_thresh {
+                    Some((x, y))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    // Mark strong edges and collect result points in parallel
+    let result_edge_points = Arc::new(Mutex::new(Vec::new()));
+
+    strong_edges.par_iter().for_each(|&(start_x, start_y)| {
+        let mut local_edges = Vec::new();
+        let mut local_stack = vec![(start_x, start_y)];
+
+        // Check if this pixel is already processed by another thread
+        {
+            let mut out_guard = out.lock().unwrap();
+            if out_guard.get_pixel(start_x, start_y)[0] != 0 {
+                return; // Already processed
+            }
+            out_guard.put_pixel(start_x, start_y, Luma::<u8>::white());
+        }
+
+        // Process connected component using depth-first search
+        while let Some((x, y)) = local_stack.pop() {
+            local_edges.push((x, y));
+
+            // Check all 8 neighbors with proper bounds checking
+            let neighbors = [
+                (x.wrapping_sub(1), y.wrapping_sub(1)),
+                (x, y.wrapping_sub(1)),
+                (x + 1, y.wrapping_sub(1)),
+                (x.wrapping_sub(1), y),
+                (x + 1, y),
+                (x.wrapping_sub(1), y + 1),
+                (x, y + 1),
+                (x + 1, y + 1),
+            ];
+
+            for &(nx, ny) in &neighbors {
+                // Bounds checking - check for overflow and out of bounds
+                if nx >= width || ny >= height || nx == u32::MAX || ny == u32::MAX {
+                    continue;
+                }
+                // Also skip border pixels
+                if nx == 0 || ny == 0 || nx >= width - 1 || ny >= height - 1 {
+                    continue;
+                }
+
+                // Check if neighbor meets low threshold and hasn't been processed
+                let neighbor_value = input.get_pixel(nx, ny)[0];
+                if neighbor_value >= low_thresh {
+                    let mut out_guard = out.lock().unwrap();
+                    if out_guard.get_pixel(nx, ny)[0] == 0 {
+                        out_guard.put_pixel(nx, ny, Luma::<u8>::white());
+                        local_stack.push((nx, ny));
+                    }
+                }
+            }
+        }
+
+        // Add local results to global result
+        if !local_edges.is_empty() {
+            let mut result_guard = result_edge_points.lock().unwrap();
+            result_guard.extend(local_edges);
+        }
+    });
+
+    // Extract final result
+    Arc::try_unwrap(result_edge_points)
+        .unwrap()
+        .into_inner()
+        .unwrap()
+}
+
+/// Performance comparison function for hysteresis optimization
+pub fn compare_hysteresis_performance(
+    input: &ImageBuffer<Luma<f32>, Vec<f32>>,
+    low_thresh: f32,
+    high_thresh: f32,
+) -> (
+    std::time::Duration,
+    std::time::Duration,
+    Vec<(u32, u32)>,
+    Vec<(u32, u32)>,
+) {
+    use std::time::Instant;
+
+    // Test original implementation
+    let start = Instant::now();
+    let original_result = hysteresis_original(input, low_thresh, high_thresh);
+    let original_time = start.elapsed();
+
+    // Test optimized implementation
+    let start = Instant::now();
+    let optimized_result = hysteresis(input, low_thresh, high_thresh);
+    let optimized_time = start.elapsed();
+
+    (
+        original_time,
+        optimized_time,
+        original_result,
+        optimized_result,
+    )
 }

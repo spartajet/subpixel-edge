@@ -11,3 +11,11 @@ rayon = "1.10.0"
 
 [dev-dependencies]
 env_logger = "0.11.8"
+
+[[example]]
+name = "subpixel_edge_dectection"
+path = "examples/subpixel_edge_dectection.rs"
+
+[[example]]
+name = "hysteresis_performance"
+path = "examples/hysteresis_performance.rs"
