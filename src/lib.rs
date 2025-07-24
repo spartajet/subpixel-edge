@@ -1,4 +1,7 @@
-use std::f32::consts::PI;
+use std::{
+    f32::consts::PI,
+    sync::{Arc, Mutex},
+};
 
 use image::{GenericImageView, GrayImage, ImageBuffer, Luma, Rgb, RgbImage, buffer::ConvertBuffer};
 use imageproc::{
@@ -6,6 +9,7 @@ use imageproc::{
     edges::canny,
     gradients::{horizontal_sobel, vertical_sobel},
 };
+use log::debug;
 use rayon::prelude::*;
 
 /// 双线性插值函数
@@ -101,134 +105,134 @@ fn subpixel_in_3x3(
     Some((sub_x, sub_y))
 }
 
-/// 基于Canny的亚像素边缘检测
-pub fn canny_based_subpixel_edges(
-    image: &GrayImage,
-    low_threshold: f32,
-    high_threshold: f32,
-    edge_point_threshold: f32,
-) -> Vec<(f32, f32)> {
-    let (width, height) = image.dimensions();
+// /// 基于Canny的亚像素边缘检测
+// pub fn canny_based_subpixel_edges(
+//     image: &GrayImage,
+//     low_threshold: f32,
+//     high_threshold: f32,
+//     edge_point_threshold: f32,
+// ) -> Vec<(f32, f32)> {
+//     let (width, height) = image.dimensions();
 
-    // 步骤1：使用Canny检测像素级边缘
-    let canny_edges = canny(image, low_threshold, high_threshold);
+//     // 步骤1：使用Canny检测像素级边缘
+//     let canny_edges = canny(image, low_threshold, high_threshold);
 
-    // 步骤2：计算梯度信息
-    // let (gx_image, gy_image) = sobel_gradients(image);
-    let gx_image = horizontal_sobel(image);
-    let gy_image = vertical_sobel(image);
+//     // 步骤2：计算梯度信息
+//     // let (gx_image, gy_image) = sobel_gradients(image);
+//     let gx_image = horizontal_sobel(image);
+//     let gy_image = vertical_sobel(image);
 
-    let gx_data: Vec<f32> = gx_image.pixels().map(|p| p[0] as f32).collect();
-    let gy_data: Vec<f32> = gy_image.pixels().map(|p| p[0] as f32).collect();
+//     let gx_data: Vec<f32> = gx_image.pixels().map(|p| p[0] as f32).collect();
+//     let gy_data: Vec<f32> = gy_image.pixels().map(|p| p[0] as f32).collect();
 
-    // 计算梯度幅值 - 并行化
-    let mag_data: Vec<f32> = gx_data
-        .par_iter()
-        .zip(gy_data.par_iter())
-        .map(|(gx, gy)| (gx.powi(2) + gy.powi(2)).sqrt())
-        .collect();
+//     // 计算梯度幅值 - 并行化
+//     let mag_data: Vec<f32> = gx_data
+//         .par_iter()
+//         .zip(gy_data.par_iter())
+//         .map(|(gx, gy)| (gx.powi(2) + gy.powi(2)).sqrt())
+//         .collect();
 
-    // 收集所有Canny边缘点 - 并行化
-    let canny_points: Vec<(u32, u32)> = (1..(height - 1))
-        .into_par_iter()
-        .flat_map(|y| {
-            let canny_edges = &canny_edges;
-            (1..(width - 1)).into_par_iter().filter_map(move |x| {
-                if canny_edges.get_pixel(x, y)[0] > 0 {
-                    Some((x, y))
-                } else {
-                    None
-                }
-            })
-        })
-        .collect();
+//     // 收集所有Canny边缘点 - 并行化
+//     let canny_points: Vec<(u32, u32)> = (1..(height - 1))
+//         .into_par_iter()
+//         .flat_map(|y| {
+//             let canny_edges = &canny_edges;
+//             (1..(width - 1)).into_par_iter().filter_map(move |x| {
+//                 if canny_edges.get_pixel(x, y)[0] > 0 {
+//                     Some((x, y))
+//                 } else {
+//                     None
+//                 }
+//             })
+//         })
+//         .collect();
 
-    // 步骤3：在Canny边缘点上进行亚像素定位 - 并行化
-    canny_points
-        .into_par_iter()
-        .filter_map(|(x, y)| {
-            subpixel_in_3x3(
-                x,
-                y,
-                &gx_data,
-                &gy_data,
-                &mag_data,
-                width,
-                height,
-                edge_point_threshold,
-            )
-        })
-        .collect()
-}
+//     // 步骤3：在Canny边缘点上进行亚像素定位 - 并行化
+//     canny_points
+//         .into_par_iter()
+//         .filter_map(|(x, y)| {
+//             subpixel_in_3x3(
+//                 x,
+//                 y,
+//                 &gx_data,
+//                 &gy_data,
+//                 &mag_data,
+//                 width,
+//                 height,
+//                 edge_point_threshold,
+//             )
+//         })
+//         .collect()
+// }
 
-/// 并行版本的Canny亚像素边缘检测
-pub fn canny_based_subpixel_edges_parallel(
-    image: &GrayImage,
-    low_threshold: f32,
-    high_threshold: f32,
-    edge_point_threshold: f32,
-) -> Vec<(f32, f32)> {
-    let (width, height) = image.dimensions();
+// /// 并行版本的Canny亚像素边缘检测
+// pub fn canny_based_subpixel_edges_parallel(
+//     image: &GrayImage,
+//     low_threshold: f32,
+//     high_threshold: f32,
+//     edge_point_threshold: f32,
+// ) -> Vec<(f32, f32)> {
+//     let (width, height) = image.dimensions();
 
-    // 步骤1：使用Canny检测像素级边缘
-    let canny_edges = canny(image, low_threshold, high_threshold);
+//     // 步骤1：使用Canny检测像素级边缘
+//     let canny_edges = canny(image, low_threshold, high_threshold);
 
-    // 步骤2：计算梯度信息
-    let gx_image = horizontal_sobel(image);
-    let gy_image = vertical_sobel(image);
-    // 并行化数据转换
-    let gx_data: Vec<f32> = gx_image
-        .pixels()
-        .collect::<Vec<_>>()
-        .into_par_iter()
-        .map(|p| p[0] as f32)
-        .collect();
-    let gy_data: Vec<f32> = gy_image
-        .pixels()
-        .collect::<Vec<_>>()
-        .into_par_iter()
-        .map(|p| p[0] as f32)
-        .collect();
+//     // 步骤2：计算梯度信息
+//     let gx_image = horizontal_sobel(image);
+//     let gy_image = vertical_sobel(image);
+//     // 并行化数据转换
+//     let gx_data: Vec<f32> = gx_image
+//         .pixels()
+//         .collect::<Vec<_>>()
+//         .into_par_iter()
+//         .map(|p| p[0] as f32)
+//         .collect();
+//     let gy_data: Vec<f32> = gy_image
+//         .pixels()
+//         .collect::<Vec<_>>()
+//         .into_par_iter()
+//         .map(|p| p[0] as f32)
+//         .collect();
 
-    // 计算梯度幅值 - 并行化
-    let mag_data: Vec<f32> = gx_data
-        .par_iter()
-        .zip(gy_data.par_iter())
-        .map(|(gx, gy)| (gx.powi(2) + gy.powi(2)).sqrt())
-        .collect();
+//     // 计算梯度幅值 - 并行化
+//     let mag_data: Vec<f32> = gx_data
+//         .par_iter()
+//         .zip(gy_data.par_iter())
+//         .map(|(gx, gy)| (gx.powi(2) + gy.powi(2)).sqrt())
+//         .collect();
 
-    // 收集所有Canny边缘点 - 并行化
-    let canny_points: Vec<(u32, u32)> = (1..(height - 1))
-        .into_par_iter()
-        .flat_map(|y| {
-            let canny_edges = &canny_edges;
-            (1..(width - 1)).into_par_iter().filter_map(move |x| {
-                if canny_edges.get_pixel(x, y)[0] > 0 {
-                    Some((x, y))
-                } else {
-                    None
-                }
-            })
-        })
-        .collect();
+//     // 收集所有Canny边缘点 - 并行化
+//     let canny_points: Vec<(u32, u32)> = (1..(height - 1))
+//         .into_par_iter()
+//         .flat_map(|y| {
+//             let canny_edges = &canny_edges;
+//             (1..(width - 1)).into_par_iter().filter_map(move |x| {
+//                 if canny_edges.get_pixel(x, y)[0] > 0 {
+//                     Some((x, y))
+//                 } else {
+//                     None
+//                 }
+//             })
+//         })
+//         .collect();
 
-    // 并行处理每个边缘点
-    canny_points
-        .into_par_iter()
-        .filter_map(|(x, y)| {
-            subpixel_in_3x3(
-                x,
-                y,
-                &gx_data,
-                &gy_data,
-                &mag_data,
-                width,
-                height,
-                edge_point_threshold,
-            )
-        })
-        .collect()
-}
+//     // 并行处理每个边缘点
+//     canny_points
+//         .into_par_iter()
+//         .filter_map(|(x, y)| {
+//             subpixel_in_3x3(
+//                 x,
+//                 y,
+//                 &gx_data,
+//                 &gy_data,
+//                 &mag_data,
+//                 width,
+//                 height,
+//                 edge_point_threshold,
+//             )
+//         })
+//         .collect()
+// }
 
 /// 可视化亚像素边缘
 pub fn visualize_edges(image: &GrayImage, edge_points: &[(f32, f32)]) -> RgbImage {
@@ -266,17 +270,25 @@ pub fn canny_based_subpixel_edges_optimized(
     edge_point_threshold: f32,
 ) -> Vec<(f32, f32)> {
     let (width, height) = image.dimensions();
-
-    // 步骤1：使用Canny检测像素级边缘
-    // let canny_edges = canny(image, low_threshold, high_threshold);
-
+    debug!("start calcualte subpixel edges");
     // 步骤2：并行计算梯度信息
-    let gx_image = horizontal_sobel(image);
-    let gy_image = vertical_sobel(image);
+    // let gx_image = horizontal_sobel(image);
+    // let gy_image = vertical_sobel(image);
+
+    let (gx_data, gy_data) = parallel_sobel_gradients(image);
+    let gx_image_data: Vec<i16> = gx_data.par_iter().map(|p| *p as i16).collect();
+    let gy_image_data: Vec<i16> = gy_data.par_iter().map(|p| *p as i16).collect();
+
+    let gx_image = ImageBuffer::from_raw(width, height, gx_image_data).unwrap();
+    let gy_image = ImageBuffer::from_raw(width, height, gy_image_data).unwrap();
+
+    debug!("gx_image and gy_image ok");
 
     // 并行化所有数据转换和计算
-    let gx_data: Vec<f32> = gx_image.pixels().map(|p| p[0] as f32).collect();
-    let gy_data: Vec<f32> = gy_image.pixels().map(|p| p[0] as f32).collect();
+    // let gx_data: Vec<f32> = gx_image.pixels().map(|p| p[0] as f32).collect();
+    // let gy_data: Vec<f32> = gy_image.pixels().map(|p| p[0] as f32).collect();
+
+    debug!("gx_data and gy_data ok");
 
     let mag_data: Vec<f32> = gx_data
         .par_iter()
@@ -284,19 +296,29 @@ pub fn canny_based_subpixel_edges_optimized(
         .map(|(gx, gy)| (gx.powi(2) + gy.powi(2)).sqrt())
         .collect();
 
+    debug!("mag_data ok");
+
     let g: Vec<f32> = gx_image
         .iter()
         .zip(gy_image.iter())
         .map(|(h, v)| (*h as f32).hypot(*v as f32))
         .collect::<Vec<f32>>();
 
+    debug!("g ok");
+
     let g = ImageBuffer::from_raw(image.width(), image.height(), g).unwrap();
+
+    debug!("g image ok");
 
     // 3. Non-maximum-suppression (Make edges thinner)
     let thinned = non_maximum_suppression(&g, &gx_image, &gy_image);
 
+    debug!("thinned ok");
+
     // 4. Hysteresis to filter out edges based on thresholds.
     let canny_edge_points = hysteresis(&thinned, low_threshold, high_threshold);
+
+    debug!("canny_edge_points ok");
 
     // 并行处理每个边缘点
     canny_edge_points
@@ -314,6 +336,71 @@ pub fn canny_based_subpixel_edges_optimized(
             )
         })
         .collect()
+}
+
+fn parallel_sobel_gradients(image: &GrayImage) -> (Vec<f32>, Vec<f32>) {
+    let (width, height) = image.dimensions();
+    let gx = Arc::new(Mutex::new(vec![0.0; (width * height) as usize]));
+    let gy = Arc::new(Mutex::new(vec![0.0; (width * height) as usize]));
+
+    // 获取原始像素数据
+    let pixels = image.as_raw();
+
+    // 定义Sobel算子内核
+    const SOBEL_KERNEL_X: [f32; 9] = [-1.0, 0.0, 1.0, -2.0, 0.0, 2.0, -1.0, 0.0, 1.0];
+    const SOBEL_KERNEL_Y: [f32; 9] = [-1.0, -2.0, -1.0, 0.0, 0.0, 0.0, 1.0, 2.0, 1.0];
+
+    // 使用Rayon并行处理每一行（跳过边界行）
+    (1..height - 1).into_par_iter().for_each(|y| {
+        // 计算当前行的起始索引
+        let row_start = (y * width) as usize;
+
+        // 获取上一行、当前行和下一行的像素切片
+        let prev_row =
+            &pixels[(row_start - width as usize)..(row_start - width as usize + width as usize)];
+        let curr_row = &pixels[row_start..(row_start + width as usize)];
+        let next_row =
+            &pixels[(row_start + width as usize)..(row_start + width as usize + width as usize)];
+
+        let mut gx_mutex = gx.lock().unwrap();
+        let mut gy_mutex = gy.lock().unwrap();
+
+        // 处理当前行的每个像素（跳过边界列）
+        for x in 1..(width - 1) {
+            let mut gx_val = 0.0;
+            let mut gy_val = 0.0;
+
+            // 3x3卷积核处理
+            for ky in 0..3 {
+                for kx in 0..3 {
+                    let pixel_x = x + kx - 1;
+
+                    // 获取像素值
+                    let pixel = if ky == 0 {
+                        prev_row[pixel_x as usize] as f32
+                    } else if ky == 1 {
+                        curr_row[pixel_x as usize] as f32
+                    } else {
+                        next_row[pixel_x as usize] as f32
+                    };
+
+                    // 应用Sobel核
+                    let kernel_index = (ky * 3 + kx) as usize;
+                    gx_val += pixel * SOBEL_KERNEL_X[kernel_index];
+                    gy_val += pixel * SOBEL_KERNEL_Y[kernel_index];
+                }
+            }
+
+            // 存储计算结果
+            let index = (y * width + x) as usize;
+            gx_mutex[index] = gx_val;
+            gy_mutex[index] = gy_val;
+        }
+    });
+
+    let gx_result = Arc::try_unwrap(gx).unwrap().into_inner().unwrap();
+    let gy_result = Arc::try_unwrap(gy).unwrap().into_inner().unwrap();
+    (gx_result, gy_result)
 }
 
 /// Finds local maxima to make the edges thinner.
@@ -373,7 +460,7 @@ fn non_maximum_suppression(
             }
         }
     }
-    println!("points len:{}", points.len());
+    debug!("points len:{}", points.len());
     out
 }
 
